@@ -11,7 +11,9 @@
 
 #include <cstdint>
 
+#include "absl/base/optimization.h"
 #include "vmsdk/src/sharded_atomic.h"
+#include "vmsdk/src/valkey_module_api/valkey_module.h"
 
 namespace vmsdk {
 
@@ -42,5 +44,13 @@ void ReportFreeMemorySize(uint64_t size) {
 int64_t GetMemoryDelta() { return memory_delta; }
 
 void SetMemoryDelta(int64_t delta) { memory_delta = delta; }
+
+void* Calloc(size_t nmemb, size_t size) {
+  void* ptr = ValkeyModule_Calloc(nmemb, AlignSize(size));
+  if (ABSL_PREDICT_TRUE(ptr != nullptr)) {
+    ReportAllocMemorySize(ValkeyModule_MallocUsableSize(ptr));
+  }
+  return ptr;
+}
 
 }  // namespace vmsdk
