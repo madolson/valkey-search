@@ -74,19 +74,7 @@
 #define VMSDK_LIBC_NOEXCEPT
 #endif
 
-namespace {
-
-// Valkey exposes no aligned allocation entry point. jemalloc returns memory
-// aligned to the size class, so rounding the request up to a multiple of the
-// alignment gets us the alignment we need.
-//
-// See https://linux.die.net/man/3/jemalloc: "... Chunks are always aligned to
-// multiples of the chunk size..."
-size_t AlignSize(size_t size, size_t alignment = 16) {
-  return (size + alignment - 1) & ~(alignment - 1);
-}
-
-}  // namespace
+using vmsdk::AlignSize;
 
 extern "C" {
 
@@ -108,11 +96,7 @@ void free(void* ptr) VMSDK_LIBC_NOEXCEPT {
 }
 
 void* calloc(size_t nmemb, size_t size) VMSDK_LIBC_NOEXCEPT {
-  void* ptr = ValkeyModule_Calloc(nmemb, AlignSize(size));
-  if (ABSL_PREDICT_TRUE(ptr != nullptr)) {
-    vmsdk::ReportAllocMemorySize(ValkeyModule_MallocUsableSize(ptr));
-  }
-  return ptr;
+  return vmsdk::Calloc(nmemb, size);
 }
 
 void* realloc(void* ptr, size_t size) VMSDK_LIBC_NOEXCEPT {
