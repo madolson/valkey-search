@@ -39,7 +39,7 @@ class TestFlushAllCMD(ValkeySearchTestCaseBase):
 
         for db in [0, 1]:
             client.select(db)
-            assert client.execute_command("FT._LIST") == []
+            assert client.execute_command("FT._LIST") == [], f"db {db}"
 
 class TestFlushAllCME(ValkeySearchClusterTestCase):
 
