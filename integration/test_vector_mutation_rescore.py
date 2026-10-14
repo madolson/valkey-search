@@ -309,3 +309,62 @@ class TestVectorMutationRescore(ValkeySearchTestCaseDebugMode):
         self._release(client, thread, err)
 
         assert during == self.vr(client) == [b"j:2"]
+
+    # -------- JSON: the refreshed distance reads the vector as text ---------
+    #
+    # A JSON vector is fetched as text, so the KNN distance refresh has to
+    # convert it the way ingestion does before it can compute anything.
+
+    def setup_json_index(self, client: Valkey) -> None:
+        client.execute_command(
+            "FT.CREATE", self.INDEX, "ON", "JSON", "PREFIX", "1", "j:",
+            "SCHEMA", "$.price", "AS", "price", "NUMERIC",
+            "$.vec", "AS", "vec", "VECTOR", "FLAT", "6",
+            "TYPE", "FLOAT32", "DIM", "4", "DISTANCE_METRIC", "L2")
+        for i in range(1, 5):
+            client.execute_command(
+                "JSON.SET", f"j:{i}", "$",
+                f'{{"price": {i}, "vec": [{i}, 0, 0, 0]}}')
+        IndexingTestHelper.wait_for_indexing_complete_on_node(
+            client, self.INDEX)
+
+    def test_json_distance_is_recomputed_and_the_reply_reordered(self):
+        """test_distance_is_recomputed_and_the_reply_reordered on JSON."""
+        client: Valkey = self.server.get_new_client()
+        self.setup_json_index(client)
+        assert [k for k, _ in self.knn(client)] == [b"j:1", b"j:2", b"j:3",
+                                                    b"j:4"]
+
+        thread, err = self._park_mutation(
+            client, "JSON.SET", "j:1", "$.vec", "[99, 0, 0, 0]")
+        during = self.knn(client)
+        self._release(client, thread, err)
+        after = self.knn(client)
+
+        assert during == after, (
+            f"reply taken across the mutation differs from a settled one: "
+            f"{during} vs {after}")
+        assert during[-1][0] == b"j:1"
+        assert abs(float(during[-1][1]) - 9801.0) < 1e-3
+
+    def test_json_hybrid_keeps_a_document_whose_vector_moved(self):
+        """FT.HYBRID's vector arm on JSON: a document whose vector moved but
+        is still a valid vector stays in the arm, scored on where it is now."""
+        client: Valkey = self.server.get_new_client()
+        self.setup_json_index(client)
+
+        thread, err = self._park_mutation(
+            client, "JSON.SET", "j:1", "$.vec", "[99, 0, 0, 0]")
+        # Started before the release for the reason given in
+        # test_a_vector_the_mutation_made_unusable_is_dropped.
+        qthread, out, qerr = run_in_thread(
+            lambda: self._hybrid_rows(self.server.get_new_client()))
+        self._release(client, thread, err)
+        qthread.join()
+        assert qerr[0] is None, qerr[0]
+
+        during = out[0]
+        assert b"vdist" in during.get(b"j:1", {}), (
+            f"the vector arm dropped a document with a valid vector: "
+            f"{during}")
+        assert abs(float(during[b"j:1"][b"vdist"]) - 9801.0) < 1e-3, during
