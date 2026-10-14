@@ -18,7 +18,7 @@ import shutil
 import pytest
 import valkey
 from valkey import Valkey
-from indexes import Index, KeyDataType, Numeric, Tag, Vector, float_to_bytes
+from indexes import Index, KeyDataType, Numeric, Tag, Vector, float16_to_bytes, float_to_bytes
 from utils import run_in_thread
 from valkey_search_test_case import LOGS_DIR, ValkeySearchTestCaseDebugMode
 from valkeytestframework.util import waiters
@@ -775,6 +775,49 @@ class TestVectorRegistryLifecycle(ValkeySearchTestCaseDebugMode):
         waiters.wait_for_equal(lambda: self.registry_stat("entry_cnt"), 0)
         self.client.execute_command("FT.DROPINDEX", "idx_item")
         waiters.wait_for_equal(lambda: self.registry_stat("entry_cnt"), 0)
+
+    @pytest.mark.parametrize("algo", ["HNSW", "FLAT"])
+    @pytest.mark.parametrize("op", ["rename", "move"])
+    def test_rename_to_index_of_another_vector_type(self, algo: str, op: str):
+        """RENAME or MOVE a key to an index that reads the field as another
+        vector type of the same width. The tracked record carries a reciprocal
+        magnitude computed as FLOAT16, which is wrong for BFLOAT16, so a
+        self-query must still score a cosine distance of 0."""
+        self.assert_sharing_active()
+        dst_client = self.client
+        if op == "move":
+            dst_client = self.server.get_new_client()
+            dst_client.select(1)
+        src = Index(
+            "idx_f16",
+            [Vector("vec", DIM, type=algo, distance="COSINE", data_type="FLOAT16")],
+            prefixes=["doc"],
+        )
+        dst = Index(
+            "idx_bf16",
+            [Vector("vec", DIM, type=algo, distance="COSINE", data_type="BFLOAT16")],
+            prefixes=["dst" if op == "rename" else "doc"],
+        )
+        src.create(self.client, wait_for_backfill=True)
+        dst.create(dst_client, wait_for_backfill=True)
+
+        vec = float16_to_bytes(VALID)
+        self.client.hset("doc:1", "vec", vec)
+        self.wait_for_docs(src, 1)
+
+        if op == "rename":
+            self.client.rename("doc:1", "dst:1")
+        else:
+            assert self.client.move("doc:1", 1) == 1
+        waiters.wait_for_equal(lambda: dst.info(dst_client).num_docs, 1)
+
+        res = dst_client.execute_command(
+            "FT.SEARCH", dst.name, "*=>[KNN 1 @vec $q AS score]",
+            "PARAMS", "2", "q", vec, "RETURN", "1", "score", "DIALECT", "2",
+        )
+        assert res[0] == 1
+        score = float(res[2][1])
+        assert abs(score) < 1e-3, f"self-query cosine distance is {score}"
 
     def test_rename_multi_vector_document(self):
         """RENAME a document holding multiple vectors within and outside the index prefix."""
