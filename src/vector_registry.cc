@@ -93,6 +93,15 @@ indexes::VectorRecordWithSize VectorRegistry::DedupOrConstruct(
   auto &db_tracked = tracked_vectors_[db_num];
   auto it = db_tracked.find(search_key);
   if (it != db_tracked.end() && it->second == vector_str) {
+    // The record may have been built by an index of another vector type with
+    // the same byte size, e.g. FLOAT16 and BFLOAT16, reached through RENAME,
+    // MOVE, or an index recreated with another type. The bytes match but the
+    // reciprocal magnitude does not, so build this index its own record. The
+    // tracked one stays, since Valkey may still reference it.
+    if (it->second.vector_record.GetReciprocalMagnitude() !=
+        vector_base->ComputeReciprocalMagnitude(vector_str)) {
+      return ConstructVectorRecord(vector_str, vector_base);
+    }
     ++stats_.dedup_cnt;
     result = it->second;
   } else {
