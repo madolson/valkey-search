@@ -515,7 +515,9 @@ absl::Status VectorBase::LoadTrackedKeys(
 }
 
 std::unique_ptr<data_model::Index> VectorBase::ToProto() const {
-  absl::ReaderMutexLock lock(&key_to_metadata_mutex_);
+  // No key_to_metadata_mutex_: nothing here reads tracked keys, and
+  // VectorHNSW::ToProtoImpl takes resize_mutex_, which IsVectorUnchanged
+  // acquires before key_to_metadata_mutex_.
   auto index_proto = std::make_unique<data_model::Index>();
   auto vector_index = std::make_unique<data_model::VectorIndex>();
   vector_index->set_normalize(normalize_);
