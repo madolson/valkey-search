@@ -641,16 +641,14 @@ void ProcessNeighborsForReply(
             ctx, attribute_data_type, parameters, neighbor.external_id->Str(),
             *vector_identifier, content.value(), scratch);
         // A JSON vector is fetched as text; convert it the way ingestion does.
+        // Text that does not parse converts to null, which views as empty and
+        // fails RecomputeDistance's size check like any other bad vector.
         vmsdk::UniqueValkeyString converted;
         if (bytes.has_value() &&
             attribute_data_type.AttributesProvidedAsString()) {
           converted = vector_index->NormalizeStringAttribute(
               vmsdk::MakeUniqueValkeyString(*bytes));
-          if (converted) {
-            bytes = vmsdk::ToStringView(converted.get());
-          } else {
-            bytes.reset();
-          }
+          bytes = vmsdk::ToStringView(converted.get());
         }
         if (bytes.has_value()) {
           auto distance =

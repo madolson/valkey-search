@@ -461,15 +461,12 @@ void RevalidateArmsBeforeFusion(MultiSearchParameters &params) {
         }
         ValkeyModuleString *vector = record->second.value.get();
         // A JSON vector is fetched as text; convert it the way ingestion does.
+        // Text that does not parse converts to null, which views as empty and
+        // is dropped below like any other vector of the wrong length.
         vmsdk::UniqueValkeyString converted;
         if (attribute_data_type.AttributesProvidedAsString()) {
           converted = vector_index->NormalizeStringAttribute(
               vmsdk::RetainUniqueValkeyString(vector));
-          if (!converted) {
-            drop[j] = 1;
-            ++dropped;
-            continue;
-          }
           vector = converted.get();
         }
         auto distance = vector_index->RecomputeDistance(
