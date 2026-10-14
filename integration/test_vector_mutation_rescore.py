@@ -368,3 +368,37 @@ class TestVectorMutationRescore(ValkeySearchTestCaseDebugMode):
             f"the vector arm dropped a document with a valid vector: "
             f"{during}")
         assert abs(float(during[b"j:1"][b"vdist"]) - 9801.0) < 1e-3, during
+
+    def test_json_vector_that_does_not_parse_is_not_rescored(self):
+        """A vector ingestion cannot parse is treated as a missing vector:
+        FT.SEARCH keeps the document's distance, as it does when the field is
+        gone, and the rest of the reply is unaffected."""
+        client: Valkey = self.server.get_new_client()
+        self.setup_json_index(client)
+
+        thread, err = self._park_mutation(
+            client, "JSON.SET", "j:1", "$.vec", '["x", 0, 0, 0]')
+        during = self.knn(client)
+        self._release(client, thread, err)
+
+        assert [k for k, _ in during if k != b"j:1"] == [b"j:2", b"j:3",
+                                                          b"j:4"], during
+
+    def test_json_hybrid_drops_a_vector_that_does_not_parse(self):
+        """test_a_vector_the_mutation_made_unusable_is_dropped on JSON, where
+        the unusable vector is one ingestion cannot parse."""
+        client: Valkey = self.server.get_new_client()
+        self.setup_json_index(client)
+
+        thread, err = self._park_mutation(
+            client, "JSON.SET", "j:1", "$.vec", '["x", 0, 0, 0]')
+        qthread, out, qerr = run_in_thread(
+            lambda: self._hybrid_rows(self.server.get_new_client()))
+        self._release(client, thread, err)
+        qthread.join()
+        assert qerr[0] is None, qerr[0]
+
+        during = out[0]
+        assert b"vdist" not in during.get(b"j:1", {}), during
+        for key in (b"j:2", b"j:3", b"j:4"):
+            assert b"vdist" in during[key], during
