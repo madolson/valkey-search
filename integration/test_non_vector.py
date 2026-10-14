@@ -219,6 +219,8 @@ def validate_buffer_multiplier_config(client: Valkey):
     # Test that invalid strings are rejected
     with pytest.raises(ResponseError):
         client.execute_command("CONFIG SET search.search-result-buffer-multiplier invalid")
+    with pytest.raises(ResponseError):
+        client.execute_command("CONFIG SET search.search-result-buffer-multiplier nan")
 
 def validate_bulk_limit_queries(client: Valkey):
     """
