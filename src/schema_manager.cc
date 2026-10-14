@@ -647,9 +647,25 @@ SchemaManager::AccumulateIndexSchemaResults(
   return total_cnt;
 }
 
-void SchemaManager::OnFlushDBEnded(ValkeyModuleCtx *ctx) {
+void SchemaManager::OnFlushDBEnded(ValkeyModuleCtx *ctx, int flushed_db) {
   absl::MutexLock lock(&db_to_index_schemas_mutex_);
-  int selected_db = ValkeyModule_GetSelectedDb(ctx);
+  if (flushed_db != -1) {
+    FlushIndexSchemasInDBInternal(ctx, flushed_db);
+    return;
+  }
+  // FLUSHALL reports dbnum -1, and the server leaves the event context on
+  // whatever DB its pooled temp client last selected.
+  std::vector<int> dbs;
+  for (const auto &[db_num, schemas] : db_to_index_schemas_) {
+    dbs.push_back(db_num);
+  }
+  for (int db_num : dbs) {
+    FlushIndexSchemasInDBInternal(ctx, db_num);
+  }
+}
+
+void SchemaManager::FlushIndexSchemasInDBInternal(ValkeyModuleCtx *ctx,
+                                                  int selected_db) {
   if (!db_to_index_schemas_.contains(selected_db)) {
     return;
   }
@@ -888,8 +904,9 @@ absl::Status SchemaManager::LoadIndex(
 void SchemaManager::OnFlushEndDBCallback(ValkeyModuleCtx *ctx,
                                          [[maybe_unused]] ValkeyModuleEvent eid,
                                          [[maybe_unused]] uint64_t subevent,
-                                         [[maybe_unused]] void *data) {
-  SchemaManager::Instance().OnFlushDBEnded(ctx);
+                                         void *data) {
+  SchemaManager::Instance().OnFlushDBEnded(
+      ctx, static_cast<ValkeyModuleFlushInfo *>(data)->dbnum);
 }
 
 void SchemaManager::OnLoadingCallback(ValkeyModuleCtx *ctx,

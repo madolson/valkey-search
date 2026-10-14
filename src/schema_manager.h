@@ -81,7 +81,7 @@ class SchemaManager {
           std::atomic<uint64_t>> &(const IndexSchema::Stats &) const>
           get_result_cnt_func) const;
 
-  void OnFlushDBEnded(ValkeyModuleCtx *ctx);
+  void OnFlushDBEnded(ValkeyModuleCtx *ctx, int flushed_db);
   void OnSwapDB(ValkeyModuleSwapDbInfo *swap_db_info);
 
   void OnLoadingEnded(ValkeyModuleCtx *ctx)
@@ -141,6 +141,9 @@ class SchemaManager {
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(db_to_index_schemas_mutex_);
   absl::StatusOr<std::shared_ptr<IndexSchema>> RemoveIndexSchemaInternal(
       int db_num, absl::string_view name)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(db_to_index_schemas_mutex_);
+
+  void FlushIndexSchemasInDBInternal(ValkeyModuleCtx *ctx, int selected_db)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(db_to_index_schemas_mutex_);
 
   void SubscribeToServerEventsIfNeeded();

@@ -231,7 +231,7 @@ TEST_F(SchemaManagerTest, TestOnFlushDB) {
         SchemaManager::Instance().GetIndexSchema(db_num_, index_name_);
     VMSDK_EXPECT_OK(previous_schema_or);
     auto previous_schema = previous_schema_or.value();
-    SchemaManager::Instance().OnFlushDBEnded(&fake_ctx_);
+    SchemaManager::Instance().OnFlushDBEnded(&fake_ctx_, db_num_);
     if (!coordinator_enabled) {
       // Expect it to be flushed
       EXPECT_EQ(SchemaManager::Instance().GetNumberOfIndexSchemas(), 0);
@@ -244,6 +244,66 @@ TEST_F(SchemaManagerTest, TestOnFlushDB) {
       auto new_schema = new_schema_or.value();
       EXPECT_NE(new_schema, previous_schema);
     }
+  }
+}
+
+TEST_F(SchemaManagerTest, TestOnFlushAll) {
+  for (bool coordinator_enabled : {true, false}) {
+    if (coordinator_enabled) {
+      coordinator::MetadataManager::InitInstance(
+          std::move(test_metadata_manager_));
+    }
+    SchemaManager::InitInstance(std::make_unique<TestableSchemaManager>(
+        &fake_ctx_, []() {}, nullptr, coordinator_enabled));
+    data_model::IndexSchema db1_proto = test_index_schema_proto_;
+    db1_proto.set_db_num(1);
+    std::shared_ptr<IndexSchema> previous_schemas[2];
+    for (int db : {0, 1}) {
+      VMSDK_EXPECT_OK(
+          SchemaManager::Instance()
+              .CreateIndexSchema(&fake_ctx_,
+                                 db == 0 ? test_index_schema_proto_ : db1_proto)
+              .status());
+      previous_schemas[db] =
+          SchemaManager::Instance().GetIndexSchema(db, index_name_).value();
+    }
+    // FLUSHALL fires with dbnum -1 while the context is still on DB 0.
+    SchemaManager::Instance().OnFlushDBEnded(&fake_ctx_, -1);
+    if (!coordinator_enabled) {
+      EXPECT_EQ(SchemaManager::Instance().GetNumberOfIndexSchemas(), 0);
+    } else {
+      EXPECT_EQ(SchemaManager::Instance().GetNumberOfIndexSchemas(), 2);
+      for (int db : {0, 1}) {
+        auto new_schema_or =
+            SchemaManager::Instance().GetIndexSchema(db, index_name_);
+        VMSDK_EXPECT_OK(new_schema_or);
+        EXPECT_NE(new_schema_or.value(), previous_schemas[db]);
+      }
+    }
+  }
+}
+
+TEST_F(SchemaManagerTest, TestOnFlushDBLeavesOtherDBs) {
+  for (bool coordinator_enabled : {true, false}) {
+    if (coordinator_enabled) {
+      coordinator::MetadataManager::InitInstance(
+          std::move(test_metadata_manager_));
+    }
+    SchemaManager::InitInstance(std::make_unique<TestableSchemaManager>(
+        &fake_ctx_, []() {}, nullptr, coordinator_enabled));
+    data_model::IndexSchema db1_proto = test_index_schema_proto_;
+    db1_proto.set_db_num(1);
+    for (const auto &proto : {test_index_schema_proto_, db1_proto}) {
+      VMSDK_EXPECT_OK(
+          SchemaManager::Instance().CreateIndexSchema(&fake_ctx_, proto));
+    }
+    auto db0_schema =
+        SchemaManager::Instance().GetIndexSchema(0, index_name_).value();
+    SchemaManager::Instance().OnFlushDBEnded(&fake_ctx_, 1);
+    EXPECT_EQ(SchemaManager::Instance().GetIndexSchema(0, index_name_).value(),
+              db0_schema);
+    EXPECT_EQ(SchemaManager::Instance().GetNumberOfIndexSchemas(),
+              coordinator_enabled ? 2 : 1);
   }
 }
 
