@@ -723,6 +723,16 @@ void IndexSchema::ProcessKeyspaceNotification(ValkeyModuleCtx *ctx,
     for (auto &attr : mutated_attributes) {
       attr.second = AttributeData(indexes::DeletionType::kRecord);
     }
+    // AppendMutatedAttribute already registered and shared this key's
+    // vectors. The index will not track the key, so FT.DROPINDEX would never
+    // release them: copy them back into the key and untrack them now.
+    absl::flat_hash_map<InternedStringPtr, VectorRegistry::Action> unshare;
+    for (const auto *vector_index : GetVectorIndexes()) {
+      unshare.emplace(vector_index->GetInternedAttributeIdentifier(),
+                      VectorRegistry::Action::kUnshare);
+    }
+    VectorRegistry::Instance().MoveKey(db_num_, interned_key, db_num_, key,
+                                       unshare);
     ++stats_.filter_rejected_keys;
     filter_rejected = true;
   }
