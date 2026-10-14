@@ -547,6 +547,77 @@ TEST_F(VectorIndexTest, ResizeHNSW) ABSL_NO_THREAD_SAFETY_ANALYSIS {
   }
 }
 
+// ModifyRecord takes resize_mutex_ then key_to_metadata_mutex_. If ToProto
+// takes them in the opposite order, a resize queued on resize_mutex_ blocks
+// ToProto's reader lock and the three threads deadlock. absl's lock-order
+// checker is compiled out of the absl these tests link, so race real threads.
+TEST_F(VectorIndexTest, HnswToProtoDoesNotDeadlockWithModifyAndResize) {
+  const uint32_t old_block_size = ValkeySearch::Instance().GetHNSWBlockSize();
+  absl::Cleanup restore_block_size = [old_block_size] {
+    EXPECT_TRUE(ValkeySearch::Instance().SetHNSWBlockSize(old_block_size).ok());
+  };
+  // Every add past the initial capacity resizes.
+  ASSERT_TRUE(ValkeySearch::Instance().SetHNSWBlockSize(1).ok());
+  constexpr int kDims = 8;
+  constexpr int kAdds = 500;
+  constexpr int kModifies = 5000;
+  auto index = VectorHNSW<float>::Create(
+      CreateHNSWVectorIndexProto(kDims, data_model::DISTANCE_METRIC_L2,
+                                 /*initial_cap=*/1, kM, kEFConstruction,
+                                 kEFRuntime),
+      attribute_identifier, attribute_data_type, 0);
+  VMSDK_EXPECT_OK(index);
+  auto *hnsw = index->get();
+  auto vectors = DeterministicallyGenerateVectors(kAdds, kDims, 1.0);
+  // VectorRegistry is main-thread only, so build every record up front.
+  auto make_record = [&](int key, int vector) {
+    auto str = vmsdk::MakeUniqueValkeyString(VectorToStr(vectors[vector]));
+    return AttributeData(VectorRegistry::Instance().DedupOrConstruct(
+        IndexToKey(key), str.get(), data_model::ATTRIBUTE_DATA_TYPE_HASH, 0,
+        hnsw));
+  };
+  VMSDK_EXPECT_OK(hnsw->AddRecord(IndexToKey(0), make_record(0, 0)));
+  std::vector<AttributeData> adds;
+  for (int i = 1; i < kAdds; ++i) {
+    adds.push_back(make_record(i, i));
+  }
+  std::vector<AttributeData> modifies;
+  for (int i = 0; i < kModifies; ++i) {
+    modifies.push_back(make_record(0, i % 2));
+  }
+
+  absl::Notification writers_done;
+  std::atomic<int> writers_running = 2;
+  auto writer_finished = [&] {
+    if (--writers_running == 0) {
+      writers_done.Notify();
+    }
+  };
+  std::thread modifier([&] {
+    for (auto &record : modifies) {
+      VMSDK_EXPECT_OK(hnsw->ModifyRecord(IndexToKey(0), std::move(record)));
+    }
+    writer_finished();
+  });
+  std::thread adder([&] {
+    for (int i = 1; i < kAdds; ++i) {
+      VMSDK_EXPECT_OK(hnsw->AddRecord(IndexToKey(i), std::move(adds[i - 1])));
+    }
+    writer_finished();
+  });
+  std::thread watchdog([&] {
+    CHECK(writers_done.WaitForNotificationWithTimeout(absl::Seconds(30)))
+        << "ToProto deadlocked with ModifyRecord and a resize";
+  });
+  while (!writers_done.HasBeenNotified()) {
+    hnsw->ToProto();
+  }
+  modifier.join();
+  adder.join();
+  watchdog.join();
+  EXPECT_EQ(hnsw->GetCapacity(), kAdds);
+}
+
 TEST_F(VectorIndexTest, ResizeFlat) ABSL_NO_THREAD_SAFETY_ANALYSIS {
   for (auto &distance_metric :
        {data_model::DISTANCE_METRIC_COSINE, data_model::DISTANCE_METRIC_L2}) {
