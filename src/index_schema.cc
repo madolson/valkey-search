@@ -38,6 +38,7 @@
 #include "src/index_schema.pb.h"
 #include "src/indexes/index_base.h"
 #include "src/indexes/numeric.h"
+#include "src/indexes/scoring/scorer.h"
 #include "src/indexes/tag.h"
 #include "src/indexes/text.h"
 #include "src/indexes/text/language_registry.h"
@@ -702,7 +703,9 @@ void IndexSchema::ProcessKeyspaceNotification(ValkeyModuleCtx *ctx,
       // The scoring algorithm decides how to handle values at query time.
       float value;
       auto str_view = vmsdk::ToStringView(score_attr_val.value().get());
-      if (absl::SimpleAtof(str_view, &value) && value == value) {  // NaN check
+      // IsNaN, not `value == value`: -ffast-math folds that to true.
+      if (absl::SimpleAtof(str_view, &value) &&
+          !indexes::scoring::IsNaN(value)) {
         document_score = value;
       }
     }
