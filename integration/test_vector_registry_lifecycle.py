@@ -1925,6 +1925,30 @@ class TestVectorRegistryLifecycle(ValkeySearchTestCaseDebugMode):
         r.execute_command("FLUSHDB")
         r.execute_command("SELECT", 0)
 
+    @pytest.mark.parametrize("accepted_first", [False, True], ids=["rejected", "accepted_then_rejected"])
+    def test_filter_rejected_key_released_on_drop(self, accepted_first: bool):
+        """A key the FILTER rejects is not in the index, so FT.DROPINDEX never
+        hands it to the registry. Its vector must not be left behind."""
+        self.assert_sharing_active()
+        r = self.client
+        vec_raw = float_to_bytes(VALID)
+        r.execute_command(
+            "FT.CREATE", "idx_filter", "ON", "HASH", "PREFIX", "1", "doc:",
+            "FILTER", "@status=='active'",
+            "SCHEMA", "status", "TAG", "vec", "VECTOR", "HNSW", "6",
+            "TYPE", "FLOAT32", "DIM", str(DIM), "DISTANCE_METRIC", "L2"
+        )
+        indexed = lambda: r.execute_command("FT.SEARCH", "idx_filter", "@status:{active|inactive}")[0]
+        if accepted_first:
+            r.hset("doc:1", mapping={"vec": vec_raw, "status": "active"})
+            waiters.wait_for_equal(indexed, 1)
+        r.hset("doc:1", mapping={"vec": vec_raw, "status": "inactive"})
+        waiters.wait_for_equal(indexed, 0)
+
+        r.execute_command("FT.DROPINDEX", "idx_filter")
+        waiters.wait_for_equal(lambda: self.registry_stat("entry_cnt"), 0, timeout=10)
+        assert r.hget("doc:1", "vec") == vec_raw
+
 class TestVectorRegistryPersistence(ValkeySearchTestCaseDebugMode):
     """Save on one server, load on another.
 
