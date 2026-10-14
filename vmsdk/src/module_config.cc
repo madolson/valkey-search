@@ -8,6 +8,8 @@
 
 #include <absl/base/no_destructor.h>
 
+#include <cstring>
+
 #include "absl/log/check.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/numbers.h"
@@ -369,6 +371,14 @@ vmsdk::config::Boolean &GetHideUserDataFromLog() {
 absl::StatusOr<double> ConfigTraits<double>::Parse(absl::string_view text) {
   double value;
   if (!absl::SimpleAtod(text, &value)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid double value: '", text, "'"));
+  }
+  // SimpleAtod accepts "nan", which passes both bounds checks in Validate.
+  // Test the bits: -ffast-math lets the compiler fold std::isnan to false.
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7FFFFFFFFFFFFFFFULL) > 0x7FF0000000000000ULL) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid double value: '", text, "'"));
   }
