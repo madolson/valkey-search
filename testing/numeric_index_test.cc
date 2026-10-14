@@ -123,18 +123,20 @@ TEST_F(NumericIndexTest, RejectsEveryNanSpelling) {
   }
 }
 
-// A NaN in the tree breaks its ordering, so erasing other values stops
-// working and removed keys keep matching range queries.
-TEST_F(NumericIndexTest, NanDoesNotBreakErase) {
+// A NaN in the tree breaks its ordering: it matches ranges it is not in, and
+// range counts stop agreeing with the keys a range returns.
+TEST_F(NumericIndexTest, NanDoesNotCorruptRanges) {
   VMSDK_EXPECT_OK(index.AddRecord("key1", "1"));
   VMSDK_EXPECT_OK(index.AddRecord("key2", "2"));
   VMSDK_EXPECT_OK(index.AddRecord("key3", "3"));
   [[maybe_unused]] auto res = index.AddRecord("key_nan", "-nan");
-  VMSDK_EXPECT_OK(index.RemoveRecord("key3"));
   auto predicate =
-      query::NumericPredicate(&index, "attribute1", "id1", 0, true, 4, true);
+      query::NumericPredicate(&index, "attribute1", "id1", 3, true, 3, true);
   auto fetcher = index.Search(predicate, false);
-  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre("key1", "key2"));
+  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre("key3"));
+  predicate =
+      query::NumericPredicate(&index, "attribute1", "id1", -5, true, -1, true);
+  EXPECT_EQ(index.Search(predicate, false)->Size(), 0);
 }
 
 TEST_F(NumericIndexTest, SimpleAddModifyRemove1) {
