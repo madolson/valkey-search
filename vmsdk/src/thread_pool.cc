@@ -174,10 +174,13 @@ void ThreadPool::JoinWorkers() {
       }
     });
     VMSDK_LOG(WARNING, nullptr)
-        << "ThreadPool shutdown timed out after 5s waiting for workers to exit;"
-        << " hung threads: " << absl::StrJoin(hung, ", ");
-    CHECK(false) << "ThreadPool shutdown timeout: " << hung.size()
-                 << " worker(s) did not become joinable within 5s";
+        << "ThreadPool shutdown still waiting after 5s for workers to exit;"
+        << " busy threads: " << absl::StrJoin(hung, ", ");
+    // Keep waiting: a graceful stop drains the whole queue, and callers free
+    // state the remaining tasks still use as soon as this returns.
+    while (count_unjoinable() > 0) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
   }
   started_ = false;
   JoinTerminatedWorkers();

@@ -143,6 +143,30 @@ TEST_P(ThreadPoolTest, GracefulMarkForStop) {
   EXPECT_FALSE(thread_pool.MarkForStop(ThreadPool::StopMode::kGraceful).ok());
 }
 
+// SHUTDOWN joins the pools with a backlog still queued. JoinWorkers must drain
+// it however long it takes, since the caller tears down state the tasks use.
+TEST_P(ThreadPoolTest, JoinWorkersDrainsBacklogLongerThanFiveSeconds) {
+  // JoinWorkers logs a warning once the wait passes 5s.
+  TestValkeyModule_Init();
+  auto priority = GetParam();
+  ThreadPool thread_pool("test-pool", 1);
+  thread_pool.StartWorkers();
+  const int task_count = 7;
+  std::atomic<int> completed{0};
+  for (int i = 0; i < task_count; ++i) {
+    EXPECT_TRUE(thread_pool.Schedule(
+        [&completed]() {
+          absl::SleepFor(absl::Seconds(1));
+          ++completed;
+        },
+        priority));
+  }
+  thread_pool.JoinWorkers();
+  EXPECT_EQ(completed.load(), task_count);
+  EXPECT_EQ(thread_pool.QueueSize(), 0);
+  TestValkeyModule_Teardown();
+}
+
 TEST_P(ThreadPoolTest, SuspendAndResumeLongTask) {
   auto test = [](bool with_delay, ThreadPool::Priority priority) {
     ThreadPool thread_pool("test-pool", 3);
