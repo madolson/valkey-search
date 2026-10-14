@@ -107,6 +107,31 @@ TEST_F(NumericIndexTest, DetectsInvalidData) {
   EXPECT_FALSE(index.IsTracked("key4"));
 }
 
+// SimpleAtod accepts other spellings of NaN. Each must be rejected the same
+// way as "nan": a NaN in the tree breaks its ordering, so erasing or querying
+// other values in the same leaf stops working.
+TEST_F(NumericIndexTest, RejectsEveryNanSpelling) {
+  for (const char *nan : {"-nan", " nan", "nan ", "NaN", "nan(1)", "+nan"}) {
+    EXPECT_EQ(index.AddRecordResult("nan_key", nan).value(),
+              RecordResult::kInvalidData)
+        << nan;
+    EXPECT_FALSE(index.IsTracked("nan_key")) << nan;
+  }
+
+  VMSDK_EXPECT_OK(index.AddRecord("key1", "1"));
+  VMSDK_EXPECT_OK(index.AddRecord("key3", "3"));
+  EXPECT_EQ(index.AddRecordResult("key_nan", "-nan").value(),
+            RecordResult::kInvalidData);
+  EXPECT_EQ(index.ModifyRecordResult("key1", "-nan").value(),
+            RecordResult::kInvalidData);
+  EXPECT_FALSE(index.IsTracked("key1"));
+  VMSDK_EXPECT_OK(index.RemoveRecord("key3"));
+  auto predicate =
+      query::NumericPredicate(&index, "attribute1", "id1", 0, true, 4, true);
+  auto fetcher = index.Search(predicate, false);
+  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre());
+}
+
 TEST_F(NumericIndexTest, SimpleAddModifyRemove1) {
   VMSDK_EXPECT_OK(index.AddRecord("key1", "1.5"));
   VMSDK_EXPECT_OK(index.AddRecord("key2", "2.0"));
