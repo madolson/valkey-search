@@ -107,6 +107,38 @@ TEST_F(NumericIndexTest, DetectsInvalidData) {
   EXPECT_FALSE(index.IsTracked("key4"));
 }
 
+// SimpleAtod accepts other spellings of NaN. Each must be rejected the same
+// way as "nan", on both the Add and Modify paths.
+TEST_F(NumericIndexTest, RejectsEveryNanSpelling) {
+  for (const std::string nan : {"-nan", " nan", "nan ", "nan(1)", "+nan"}) {
+    EXPECT_EQ(index.AddRecordResult("add" + nan, nan).value(),
+              RecordResult::kInvalidData)
+        << nan;
+    EXPECT_FALSE(index.IsTracked("add" + nan)) << nan;
+    VMSDK_EXPECT_OK(index.AddRecord("mod" + nan, "1"));
+    EXPECT_EQ(index.ModifyRecordResult("mod" + nan, nan).value(),
+              RecordResult::kInvalidData)
+        << nan;
+    EXPECT_FALSE(index.IsTracked("mod" + nan)) << nan;
+  }
+}
+
+// A NaN in the tree breaks its ordering: it matches ranges it is not in, and
+// range counts stop agreeing with the keys a range returns.
+TEST_F(NumericIndexTest, NanDoesNotCorruptRanges) {
+  VMSDK_EXPECT_OK(index.AddRecord("key1", "1"));
+  VMSDK_EXPECT_OK(index.AddRecord("key2", "2"));
+  VMSDK_EXPECT_OK(index.AddRecord("key3", "3"));
+  [[maybe_unused]] auto res = index.AddRecord("key_nan", "-nan");
+  auto predicate =
+      query::NumericPredicate(&index, "attribute1", "id1", 3, true, 3, true);
+  auto fetcher = index.Search(predicate, false);
+  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre("key3"));
+  predicate =
+      query::NumericPredicate(&index, "attribute1", "id1", -5, true, -1, true);
+  EXPECT_EQ(index.Search(predicate, false)->Size(), 0);
+}
+
 TEST_F(NumericIndexTest, SimpleAddModifyRemove1) {
   VMSDK_EXPECT_OK(index.AddRecord("key1", "1.5"));
   VMSDK_EXPECT_OK(index.AddRecord("key2", "2.0"));
