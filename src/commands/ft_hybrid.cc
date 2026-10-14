@@ -459,8 +459,21 @@ void RevalidateArmsBeforeFusion(MultiSearchParameters &params) {
           ++dropped;
           continue;
         }
+        ValkeyModuleString *vector = record->second.value.get();
+        // A JSON vector is fetched as text; convert it the way ingestion does.
+        vmsdk::UniqueValkeyString converted;
+        if (attribute_data_type.AttributesProvidedAsString()) {
+          converted = vector_index->NormalizeStringAttribute(
+              vmsdk::RetainUniqueValkeyString(vector));
+          if (!converted) {
+            drop[j] = 1;
+            ++dropped;
+            continue;
+          }
+          vector = converted.get();
+        }
         auto distance = vector_index->RecomputeDistance(
-            vmsdk::ToStringView(record->second.value.get()), arm->query);
+            vmsdk::ToStringView(vector), arm->query);
         if (!distance.ok()) {
           // The field is there but cannot be turned into a distance -- the
           // mutation wrote a vector of the wrong length, so it no longer
