@@ -8,6 +8,8 @@
 #include "src/indexes/numeric.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,7 +32,15 @@ namespace valkey_search::indexes {
 namespace {
 std::optional<double> ParseNumber(absl::string_view data) {
   double value;
-  if (absl::AsciiStrToLower(data) == "nan" || !absl::SimpleAtod(data, &value)) {
+  if (!absl::SimpleAtod(data, &value)) {
+    return std::nullopt;
+  }
+  // SimpleAtod accepts "-nan", " nan", "nan(1)" and other NaN spellings, and a
+  // NaN breaks the tree's ordering. Test the bits: -ffast-math folds
+  // std::isnan to false.
+  uint64_t bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7FFFFFFFFFFFFFFFULL) > 0x7FF0000000000000ULL) {
     return std::nullopt;
   }
   return value;
