@@ -195,6 +195,24 @@ TEST_F(TextIndexSchemaTest, CommitKeyDataReturnsZeroForEmptyStage) {
   EXPECT_EQ(commit.norm, 0);
 }
 
+// A stemmed field that fails UTF-8 validation stages nothing, but the commit
+// must still release the key's stem staging entry, which holds a key reference.
+TEST_F(TextIndexSchemaTest, CommitKeyDataReleasesStemStageOnInvalidUtf8) {
+  auto schema = CreateSchema();
+  data_model::TextIndex proto;
+  auto text = std::make_shared<Text>(proto, schema);
+  schema->SetStemTextFieldMask(1);
+
+  auto key = StringInternStore::Intern("bad_utf8");
+  const size_t ref_count = key.RefCount();
+  auto staged = schema->StageAttributeData(key, "\xff", 0, /*stem=*/true,
+                                           /*suffix=*/false);
+  ASSERT_TRUE(staged.ok());
+  ASSERT_FALSE(*staged);
+  schema->CommitKeyData(key);
+  EXPECT_EQ(key.RefCount(), ref_count);
+}
+
 TEST_F(TextIndexSchemaTest, TotalDocLenAccumulatesAcrossDocuments) {
   auto schema = CreateSchema();
   data_model::TextIndex proto;
