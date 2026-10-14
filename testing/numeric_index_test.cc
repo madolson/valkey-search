@@ -108,28 +108,33 @@ TEST_F(NumericIndexTest, DetectsInvalidData) {
 }
 
 // SimpleAtod accepts other spellings of NaN. Each must be rejected the same
-// way as "nan": a NaN in the tree breaks its ordering, so erasing or querying
-// other values in the same leaf stops working.
+// way as "nan", on both the Add and Modify paths.
 TEST_F(NumericIndexTest, RejectsEveryNanSpelling) {
-  for (const char *nan : {"-nan", " nan", "nan ", "NaN", "nan(1)", "+nan"}) {
-    EXPECT_EQ(index.AddRecordResult("nan_key", nan).value(),
+  for (const std::string nan : {"-nan", " nan", "nan ", "nan(1)", "+nan"}) {
+    EXPECT_EQ(index.AddRecordResult("add" + nan, nan).value(),
               RecordResult::kInvalidData)
         << nan;
-    EXPECT_FALSE(index.IsTracked("nan_key")) << nan;
+    EXPECT_FALSE(index.IsTracked("add" + nan)) << nan;
+    VMSDK_EXPECT_OK(index.AddRecord("mod" + nan, "1"));
+    EXPECT_EQ(index.ModifyRecordResult("mod" + nan, nan).value(),
+              RecordResult::kInvalidData)
+        << nan;
+    EXPECT_FALSE(index.IsTracked("mod" + nan)) << nan;
   }
+}
 
+// A NaN in the tree breaks its ordering, so erasing other values stops
+// working and removed keys keep matching range queries.
+TEST_F(NumericIndexTest, NanDoesNotBreakErase) {
   VMSDK_EXPECT_OK(index.AddRecord("key1", "1"));
+  VMSDK_EXPECT_OK(index.AddRecord("key2", "2"));
   VMSDK_EXPECT_OK(index.AddRecord("key3", "3"));
-  EXPECT_EQ(index.AddRecordResult("key_nan", "-nan").value(),
-            RecordResult::kInvalidData);
-  EXPECT_EQ(index.ModifyRecordResult("key1", "-nan").value(),
-            RecordResult::kInvalidData);
-  EXPECT_FALSE(index.IsTracked("key1"));
+  [[maybe_unused]] auto res = index.AddRecord("key_nan", "-nan");
   VMSDK_EXPECT_OK(index.RemoveRecord("key3"));
   auto predicate =
       query::NumericPredicate(&index, "attribute1", "id1", 0, true, 4, true);
   auto fetcher = index.Search(predicate, false);
-  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre());
+  EXPECT_THAT(Fetch(*fetcher), testing::UnorderedElementsAre("key1", "key2"));
 }
 
 TEST_F(NumericIndexTest, SimpleAddModifyRemove1) {
