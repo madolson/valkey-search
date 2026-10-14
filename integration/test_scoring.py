@@ -453,6 +453,17 @@ class TestScoring(ValkeySearchTestCaseBase):
             {k: world[k] for k in ("doc:1", "doc:2", "doc:3", "doc:4", "doc:7")},
             abs=SCORE_ABS_TOL)
 
+    # A NaN boost falls back to the index-level SCORE, like a missing one.
+    def test_nan_document_score(self):
+        client = self.server.get_new_client()
+        load(client, IDX_DOC_SCORE, {
+            "doc:1": {"body": "hello world"},
+            "doc:2": {"body": "hello world", "boost": "nan"},
+        })
+        _, scores = search(client, IDX_DOC_SCORE, "hello")
+        assert scores["doc:2"] == pytest.approx(scores["doc:1"],
+                                                abs=SCORE_ABS_TOL)
+
     # Group 5: term frequency is counted document-wide, not per field.
     def test_doc_wide_term_frequency(self):
         client = self.server.get_new_client()
