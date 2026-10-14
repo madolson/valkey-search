@@ -1,3 +1,5 @@
+import os
+import pytest
 from ft_info_parser import FTInfoParser
 from indexes import *
 from valkey.client import Valkey
@@ -58,3 +60,49 @@ class TestExpired(ValkeySearchTestCaseBase):
             0,
         )
         assert index.info(client).num_docs == 1
+
+    @pytest.mark.parametrize("algo", ["HNSW", "FLAT"])
+    @pytest.mark.parametrize("distance", ["L2", "COSINE"])
+    def test_vector_expired_before_rdb_load(self, algo, distance):
+        """
+        A primary drops keys and hash fields whose TTL passed before the RDB
+        is loaded, so the saved index can name vectors that no longer exist.
+        """
+        client: Valkey = self.server.get_new_client()
+        index = Index(
+            "my_index", [Vector("v", 3, type=algo, distance=distance), Numeric("n")]
+        )
+        index.create(client, wait_for_backfill=True)
+        num_of_docs = 10
+        index.load_data(client, num_of_docs)
+        waiters.wait_for_equal(lambda: index.info(client).num_docs, num_of_docs)
+
+        # Keep the expired key and field in memory so SAVE writes them.
+        client.execute_command("DEBUG", "SET-ACTIVE-EXPIRE", "0")
+        client.pexpire(index.keyname(0), 1)
+        client.execute_command("HPEXPIRE", index.keyname(1), 1, "FIELDS", 1, "v")
+        client.execute_command("SAVE")
+        os.environ["SKIPLOGCLEAN"] = "1"
+        self.server.restart(remove_rdb=False)
+        client = self.server.get_new_client()
+        index.wait_for_backfill_complete(client)
+
+        def knn_keys():
+            # Nearer to a zero vector than to any stored one under both
+            # metrics, so a dropped record left live would take a slot.
+            query = float_to_bytes([-1.0, -1.0, -1.0])
+            return set(
+                index.query(
+                    client,
+                    f"*=>[KNN {len(expected)} @v $q]",
+                    "PARAMS", "2", "q", query, "DIALECT", "2",
+                ).keys()
+            )
+
+        expected = {index.keyname(i).encode() for i in range(2, num_of_docs)}
+        assert knn_keys() == expected
+        assert index.info(client).num_docs == num_of_docs - 1
+
+        index.write_data(client, num_of_docs, index.make_data(num_of_docs))
+        expected.add(index.keyname(num_of_docs).encode())
+        waiters.wait_for_equal(knn_keys, expected)
