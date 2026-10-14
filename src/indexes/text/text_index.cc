@@ -216,6 +216,18 @@ absl::StatusOr<bool> TextIndexSchema::StageAttributeData(
 
 TextIndexSchema::CommitResult TextIndexSchema::CommitKeyData(
     const InternedStringPtr &key) {
+  // Retrieve the key's stem mappings. This comes before the early return below
+  // because StageAttributeData creates the entry before tokenizing, so a
+  // stemmed field that fails UTF-8 validation leaves one with no staged data.
+  InProgressStemMap stem_mappings;
+  if (stem_text_field_mask_ != 0u) {
+    std::lock_guard<std::mutex> stem_guard(in_progress_stem_mappings_mutex_);
+    auto stem_node = in_progress_stem_mappings_.extract(key);
+    if (!stem_node.empty()) {
+      stem_mappings = std::move(stem_node.mapped());
+    }
+  }
+
   // Retrieve the key's staged data
   TokenPositions token_positions;
   {
@@ -226,16 +238,6 @@ TextIndexSchema::CommitResult TextIndexSchema::CommitKeyData(
       return {};
     }
     token_positions = std::move(node.mapped());
-  }
-
-  // Retrieve the key's stem mappings
-  InProgressStemMap stem_mappings;
-  if (stem_text_field_mask_ != 0u) {
-    std::lock_guard<std::mutex> stem_guard(in_progress_stem_mappings_mutex_);
-    auto stem_node = in_progress_stem_mappings_.extract(key);
-    if (!stem_node.empty()) {
-      stem_mappings = std::move(stem_node.mapped());
-    }
   }
 
   TextIndex key_index{with_suffix_trie_};
