@@ -265,17 +265,28 @@ absl::StatusOr<RecordResult> Tag::ModifyRecord(const InternedStringPtr &key,
         absl::StrCat("Key `", key->Str(), "` not found"));
   }
   auto &tag_info = it->second;
-  auto old_parsed_tags = ParseRecordTags(*tag_info.raw_tag_string, separator_);
+  // Diff normalized tags, since that is what the tree is keyed by. On a
+  // case-insensitive index "Blue" and "blue" share one entry, so a raw diff
+  // would deindex the key from the entry it still belongs to.
+  absl::flat_hash_set<std::string> new_tags;
+  for (const auto &tag : new_parsed_tags) {
+    new_tags.insert(Normalize(tag));
+  }
+  absl::flat_hash_set<std::string> old_tags;
+  for (const auto &tag :
+       ParseRecordTags(*tag_info.raw_tag_string, separator_)) {
+    old_tags.insert(Normalize(tag));
+  }
 
   // insert new tags that are not present in the old tags.
-  for (const auto &tag : new_parsed_tags) {
-    if (!old_parsed_tags.contains(tag)) {
+  for (const auto &tag : new_tags) {
+    if (!old_tags.contains(tag)) {
       IndexTagForKey(tag, key);
     }
   }
   // remove old tags that are not present in the new tags.
-  for (const auto &tag : old_parsed_tags) {
-    if (!new_parsed_tags.contains(tag)) {
+  for (const auto &tag : old_tags) {
+    if (!new_tags.contains(tag)) {
       DeindexTagForKey(tag, key);
     }
   }

@@ -172,6 +172,23 @@ TEST_F(TagIndexTest, ModifyRecordWithEmptyString) {
   EXPECT_EQ(index->GetTrackedKeyCount(), 0);
 }
 
+TEST_F(TagIndexTest, ModifyRecordCaseOnlyChangeKeepsKeyIndexed) {
+  auto search = [&](const std::string& filter_tag_string) {
+    auto parsed_tags = FilterParser::ParseQueryTags(filter_tag_string).value();
+    query::TagPredicate predicate(index.get(), alias, identifier,
+                                  filter_tag_string, parsed_tags);
+    auto entries_fetcher = index->Search(predicate, false);
+    return Fetch(*entries_fetcher);
+  };
+  EXPECT_TRUE(index->AddRecord("key1", "Blue").value());
+  EXPECT_TRUE(index->ModifyRecord("key1", "blue").value());
+  EXPECT_THAT(search("blue"), testing::UnorderedElementsAre("key1"));
+
+  EXPECT_TRUE(index->ModifyRecord("key1", "BLUE,red").value());
+  EXPECT_THAT(search("blue"), testing::UnorderedElementsAre("key1"));
+  EXPECT_THAT(search("red"), testing::UnorderedElementsAre("key1"));
+}
+
 TEST_F(TagIndexTest, KeyTrackingTest) {
   EXPECT_TRUE(index->AddRecord("key1", "tag1").value());
   EXPECT_TRUE(index->AddRecord("key2", "tag2").value());
