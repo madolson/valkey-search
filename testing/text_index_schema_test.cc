@@ -17,6 +17,8 @@
 #include "src/indexes/text/language_registry.h"
 #include "src/indexes/text/text_index.h"
 #include "src/utils/string_interning.h"
+#include "src/valkey_search_options.h"
+#include "src/version.h"
 #include "testing/common.h"
 #include "vmsdk/src/testing_infra/utils.h"
 
@@ -26,14 +28,27 @@ namespace text {
 
 class TextIndexSchemaTest : public vmsdk::ValkeyTest {
  protected:
-  void SetUp() override { vmsdk::ValkeyTest::SetUp(); }
+  void SetUp() override {
+    vmsdk::ValkeyTest::SetUp();
+    saved_emulate_release_ = options::GetEmulateRelease().GetValue();
+  }
+  void TearDown() override {
+    VMSDK_EXPECT_OK(
+        options::GetEmulateRelease().SetValue(saved_emulate_release_));
+    vmsdk::ValkeyTest::TearDown();
+  }
 
-  std::shared_ptr<TextIndexSchema> CreateSchema() {
+  std::shared_ptr<TextIndexSchema> CreateSchema(uint32_t min_stem_size = 4) {
     std::vector<std::string> empty_stop_words;
     return std::make_shared<TextIndexSchema>(
         LanguageRegistry::Instance().Get(data_model::LANGUAGE_ENGLISH),
         " \t\n\r!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", empty_stop_words, false,
-        4);
+        min_stem_size);
+  }
+
+  // English counts MINSTEMSIZE in bytes before 1.3.0 and in code points after.
+  void SetEmulateRelease(vmsdk::ValkeyVersion version) {
+    VMSDK_EXPECT_OK(options::GetEmulateRelease().SetValue(version));
   }
 
   // Stages a stemmed field 0 and commits, as an indexed document would.
@@ -58,6 +73,9 @@ class TextIndexSchemaTest : public vmsdk::ValkeyTest {
     if (variants.empty()) return std::nullopt;
     return distinct_docs;
   }
+
+ private:
+  vmsdk::ValkeyVersion saved_emulate_release_{0};
 };
 
 // A document counts once per stem root however many inflections it holds, so
@@ -111,6 +129,59 @@ TEST_F(TextIndexSchemaTest, StemDistinctDocsDecrementsOnDelete) {
   // The last document leaves no parents, so the root drops out of the tree.
   schema->DeleteKeyData(key2);
   EXPECT_EQ(StemDistinctDocs(*schema, "running"), std::nullopt);
+}
+
+// "cafés" is 5 code points and 6 bytes, so with MINSTEMSIZE 6 it is stemmed
+// only when lengths are counted in bytes. Deleting the document after
+// emulate-release changes the unit must still drop its stem-tree entry, or a
+// stemmed query for the root finds a parent word that is no longer indexed.
+TEST_F(TextIndexSchemaTest, StemDeleteUsesCommitTimeLengthUnit) {
+  auto schema = CreateSchema(/*min_stem_size=*/6);
+  data_model::TextIndex proto;
+  auto text = std::make_shared<Text>(proto, schema);
+  schema->SetStemTextFieldMask(1);
+
+  auto key = StringInternStore::Intern("doc1");
+  SetEmulateRelease(kRelease12);
+  CommitStemmed(*schema, key, "cafés");
+  ASSERT_EQ(StemDistinctDocs(*schema, "cafés"), 1);
+
+  SetEmulateRelease(kRelease13);
+  schema->DeleteKeyData(key);
+  EXPECT_EQ(StemDistinctDocs(*schema, "cafés"), std::nullopt);
+}
+
+// Two documents hold the same word, one stemmed under each unit. Each delete
+// undoes only what its own commit counted, and the parent word leaves the stem
+// tree with the last document whichever unit that document used.
+TEST_F(TextIndexSchemaTest, StemDeleteWithMixedLengthUnits) {
+  auto schema = CreateSchema(/*min_stem_size=*/6);
+  data_model::TextIndex proto;
+  auto text = std::make_shared<Text>(proto, schema);
+  schema->SetStemTextFieldMask(1);
+
+  auto bytes_key = StringInternStore::Intern("doc1");
+  auto code_points_key = StringInternStore::Intern("doc2");
+  SetEmulateRelease(kRelease12);
+  CommitStemmed(*schema, bytes_key, "cafés");
+  SetEmulateRelease(kRelease13);
+  CommitStemmed(*schema, code_points_key, "cafés");
+  ASSERT_EQ(StemDistinctDocs(*schema, "cafés"), 1);
+
+  // The code-point document never counted the root.
+  SetEmulateRelease(kRelease12);
+  schema->DeleteKeyData(code_points_key);
+  EXPECT_EQ(StemDistinctDocs(*schema, "cafés"), 1);
+
+  SetEmulateRelease(kRelease13);
+  CommitStemmed(*schema, code_points_key, "cafés");
+  schema->DeleteKeyData(bytes_key);
+  EXPECT_EQ(StemDistinctDocs(*schema, "cafés"), 0);
+
+  // The last holder of "cafés" was not stemmed, but the parent entry added by
+  // the byte-counted document must still go.
+  schema->DeleteKeyData(code_points_key);
+  EXPECT_EQ(StemDistinctDocs(*schema, "cafés"), std::nullopt);
 }
 
 // Concurrent CommitKeyData calls with overlapping words must
