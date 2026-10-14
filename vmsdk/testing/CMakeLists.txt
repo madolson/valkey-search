@@ -28,6 +28,15 @@ target_include_directories(epoch_reclamation_test
 target_link_libraries(epoch_reclamation_test PUBLIC vmsdklib)
 finalize_test_flags(epoch_reclamation_test)
 
+set(SRCS_MEMORY_ALLOCATION_TEST
+    ${CMAKE_CURRENT_LIST_DIR}/memory_allocation_test.cc)
+add_executable(memory_allocation_test ${SRCS_MEMORY_ALLOCATION_TEST})
+target_include_directories(memory_allocation_test
+                           PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(memory_allocation_test PUBLIC vmsdklib)
+target_link_libraries(memory_allocation_test PUBLIC vmsdk_testing_infra)
+finalize_test_flags(memory_allocation_test)
+
 set(SRCS_MODULE_TYPE_TEST ${CMAKE_CURRENT_LIST_DIR}/module_type_test.cc)
 add_executable(module_type_test ${SRCS_MODULE_TYPE_TEST})
 target_include_directories(module_type_test PUBLIC ${CMAKE_CURRENT_LIST_DIR})

@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdint>
 
 #include "absl/base/optimization.h"
@@ -46,7 +47,17 @@ int64_t GetMemoryDelta() { return memory_delta; }
 void SetMemoryDelta(int64_t delta) { memory_delta = delta; }
 
 void* Calloc(size_t nmemb, size_t size) {
-  void* ptr = ValkeyModule_Calloc(nmemb, AlignSize(size));
+  // Alignment depends only on the size of the whole block, so round the total.
+  // Rounding each element instead inflates small elements up to 16x. Valkey's
+  // Calloc multiplies its arguments without checking, so the product, and the
+  // rounding of it, are checked here.
+  size_t total;
+  if (ABSL_PREDICT_FALSE(__builtin_mul_overflow(nmemb, size, &total) ||
+                         AlignSize(total) < total)) {
+    errno = ENOMEM;
+    return nullptr;
+  }
+  void* ptr = ValkeyModule_Calloc(1, AlignSize(total));
   if (ABSL_PREDICT_TRUE(ptr != nullptr)) {
     ReportAllocMemorySize(ValkeyModule_MallocUsableSize(ptr));
   }
