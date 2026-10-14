@@ -485,6 +485,27 @@ absl::Status VectorBase::LoadTrackedKeys(
       return absl::InvalidArgumentError("Error parsing metadata from proto");
     }
     auto interned_key = StringInternStore::Intern(tracked_key_metadata.key());
+    auto key = vmsdk::MakeUniqueValkeyString(interned_key->Str());
+    auto key_obj = vmsdk::MakeUniqueValkeyOpenKey(
+        ctx, key.get(), VALKEYMODULE_OPEN_KEY_NOEFFECTS | VALKEYMODULE_READ);
+    absl::StatusOr<vmsdk::UniqueValkeyString> attribute_status =
+        absl::NotFoundError("Key not found");
+    if (key_obj) {
+      attribute_status = attribute_data_type->GetAttribute(
+          ctx, key_obj.get(), interned_key->Str(), attribute_identifier_);
+    }
+    if (!attribute_status.ok()) {
+      // A primary drops keys and hash fields whose TTL passed before the RDB
+      // is loaded, so the vector can be gone. Remove the record as a delete
+      // would have. HNSW still traverses deleted nodes and the saved vector
+      // was not kept (see LoadFromRDB), so the tombstone gets a zero vector.
+      GetVectorLockFree(tracked_key_metadata.internal_id()) =
+          VectorRecord::Construct(std::string(GetVectorDataSize(), '\0'), 1.0f,
+                                  GetVectorAllocator());
+      VMSDK_RETURN_IF_ERROR(
+          RemoveRecordImpl(tracked_key_metadata.internal_id()));
+      continue;
+    }
     tracked_metadata_by_key_.insert(
         {interned_key,
          {.internal_id = tracked_key_metadata.internal_id(),
@@ -492,14 +513,6 @@ absl::Status VectorBase::LoadTrackedKeys(
     key_by_internal_id_.insert(
         {tracked_key_metadata.internal_id(), interned_key});
 
-    auto key = vmsdk::MakeUniqueValkeyString(interned_key->Str());
-    auto key_obj = vmsdk::MakeUniqueValkeyOpenKey(
-        ctx, key.get(), VALKEYMODULE_OPEN_KEY_NOEFFECTS | VALKEYMODULE_READ);
-    CHECK(key_obj) << "Failed to open key during LoadTrackedKeys: "
-                   << interned_key->Str();
-    auto attribute_status = attribute_data_type->GetAttribute(
-        ctx, key_obj.get(), interned_key->Str(), attribute_identifier_);
-    CHECK(attribute_status.ok());
     auto attribute_val = std::move(attribute_status.value());
     if (attribute_data_type->AttributesProvidedAsString() && attribute_val) {
       attribute_val = NormalizeStringAttribute(std::move(attribute_val));
