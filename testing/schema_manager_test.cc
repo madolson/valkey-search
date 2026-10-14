@@ -283,6 +283,30 @@ TEST_F(SchemaManagerTest, TestOnFlushAll) {
   }
 }
 
+TEST_F(SchemaManagerTest, TestOnFlushDBLeavesOtherDBs) {
+  for (bool coordinator_enabled : {true, false}) {
+    if (coordinator_enabled) {
+      coordinator::MetadataManager::InitInstance(
+          std::move(test_metadata_manager_));
+    }
+    SchemaManager::InitInstance(std::make_unique<TestableSchemaManager>(
+        &fake_ctx_, []() {}, nullptr, coordinator_enabled));
+    data_model::IndexSchema db1_proto = test_index_schema_proto_;
+    db1_proto.set_db_num(1);
+    for (const auto &proto : {test_index_schema_proto_, db1_proto}) {
+      VMSDK_EXPECT_OK(
+          SchemaManager::Instance().CreateIndexSchema(&fake_ctx_, proto));
+    }
+    auto db0_schema =
+        SchemaManager::Instance().GetIndexSchema(0, index_name_).value();
+    SchemaManager::Instance().OnFlushDBEnded(&fake_ctx_, 1);
+    EXPECT_EQ(SchemaManager::Instance().GetIndexSchema(0, index_name_).value(),
+              db0_schema);
+    EXPECT_EQ(SchemaManager::Instance().GetNumberOfIndexSchemas(),
+              coordinator_enabled ? 2 : 1);
+  }
+}
+
 TEST_F(SchemaManagerTest, TestOnShutdownCallback) {
   for (bool coordinator_enabled : {true, false}) {
     if (coordinator_enabled) {
