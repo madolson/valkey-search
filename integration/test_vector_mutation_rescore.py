@@ -347,27 +347,43 @@ class TestVectorMutationRescore(ValkeySearchTestCaseDebugMode):
         assert during[-1][0] == b"j:1"
         assert abs(float(during[-1][1]) - 9801.0) < 1e-3
 
+    def _hybrid_across_mutation(self, client: Valkey, *write):
+        """FT.HYBRID rows from a query whose arms ran before `write` applied,
+        next to the rows of one issued after it.
+
+        The arms run against the pre-mutation index and the query parks
+        behind the mutation, so RevalidateArmsBeforeFusion runs against the
+        new document. Waiting for the query to block before releasing is what
+        guarantees that; otherwise the arms can see the new index and there
+        is nothing to revalidate."""
+        thread, err = self._park_mutation(client, *write)
+        blocked_before = client.info("SEARCH").get(
+            "search_text_query_blocked_count", 0)
+        qthread, out, qerr = run_in_thread(
+            lambda: self._hybrid_rows(self.server.get_new_client()))
+        waiters.wait_for_true(
+            lambda: client.info("SEARCH")["search_text_query_blocked_count"]
+            >= blocked_before + 1,
+            timeout=5)
+        self._release(client, thread, err)
+        qthread.join()
+        assert qerr[0] is None, qerr[0]
+        return out[0], self._hybrid_rows(client)
+
     def test_json_hybrid_keeps_a_document_whose_vector_moved(self):
         """FT.HYBRID's vector arm on JSON: a document whose vector moved but
         is still a valid vector stays in the arm, scored on where it is now."""
         client: Valkey = self.server.get_new_client()
         self.setup_json_index(client)
 
-        thread, err = self._park_mutation(
+        parked, fresh = self._hybrid_across_mutation(
             client, "JSON.SET", "j:1", "$.vec", "[99, 0, 0, 0]")
-        # Started before the release for the reason given in
-        # test_a_vector_the_mutation_made_unusable_is_dropped.
-        qthread, out, qerr = run_in_thread(
-            lambda: self._hybrid_rows(self.server.get_new_client()))
-        self._release(client, thread, err)
-        qthread.join()
-        assert qerr[0] is None, qerr[0]
 
-        during = out[0]
-        assert b"vdist" in during.get(b"j:1", {}), (
+        assert b"vdist" in parked.get(b"j:1", {}), (
             f"the vector arm dropped a document with a valid vector: "
-            f"{during}")
-        assert abs(float(during[b"j:1"][b"vdist"]) - 9801.0) < 1e-3, during
+            f"{parked}")
+        assert parked[b"j:1"][b"vdist"] == fresh[b"j:1"][b"vdist"], (
+            parked, fresh)
 
     def test_json_vector_that_does_not_parse_is_not_rescored(self):
         """A vector ingestion cannot parse is treated as a missing vector:
@@ -390,15 +406,9 @@ class TestVectorMutationRescore(ValkeySearchTestCaseDebugMode):
         client: Valkey = self.server.get_new_client()
         self.setup_json_index(client)
 
-        thread, err = self._park_mutation(
+        parked, _ = self._hybrid_across_mutation(
             client, "JSON.SET", "j:1", "$.vec", '["x", 0, 0, 0]')
-        qthread, out, qerr = run_in_thread(
-            lambda: self._hybrid_rows(self.server.get_new_client()))
-        self._release(client, thread, err)
-        qthread.join()
-        assert qerr[0] is None, qerr[0]
 
-        during = out[0]
-        assert b"vdist" not in during.get(b"j:1", {}), during
+        assert b"vdist" not in parked.get(b"j:1", {}), parked
         for key in (b"j:2", b"j:3", b"j:4"):
-            assert b"vdist" in during[key], during
+            assert b"vdist" in parked[key], parked
