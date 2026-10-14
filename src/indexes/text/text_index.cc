@@ -329,7 +329,7 @@ TextIndexSchema::CommitResult TextIndexSchema::CommitKeyData(
   {
     std::lock_guard<std::mutex> per_key_guard(per_key_text_indexes_mutex_);
     per_key_text_indexes_.emplace(key, std::move(key_index));
-    per_key_scoring_info_[key] = {doc_len, norm};
+    per_key_scoring_info_[key] = {doc_len, norm, language_->GetLengthUnit()};
     metadata_.total_doc_len += doc_len;
     metadata_.total_term_frequency += doc_len;
   }
@@ -340,6 +340,7 @@ TextIndexSchema::CommitResult TextIndexSchema::CommitKeyData(
 void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
   // Extract the per-key index and scoring info
   absl::node_hash_map<Key, TextIndex>::node_type node;
+  LengthUnit unit = language_->GetLengthUnit();
   {
     std::lock_guard<std::mutex> per_key_guard(per_key_text_indexes_mutex_);
     node = per_key_text_indexes_.extract(key);
@@ -349,6 +350,7 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
     auto scoring_node = per_key_scoring_info_.extract(key);
     if (!scoring_node.empty()) {
       metadata_.total_doc_len -= scoring_node.mapped().doc_len;
+      unit = scoring_node.mapped().stem_unit;
     }
   }
   TextIndex &key_index = node.mapped();
@@ -356,7 +358,6 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
   // Roots this key incremented; a set, so each is decremented exactly once.
   absl::flat_hash_set<std::string> stem_roots;
   Stemmer *stem_filter = language_->GetStemmer();
-  const LengthUnit unit = language_->GetLengthUnit();
 
   auto iter = key_index.GetPrefix().GetWordIterator("");
   while (!iter.Done()) {
@@ -423,9 +424,9 @@ void TextIndexSchema::DeleteKeyData(const InternedStringPtr &key) {
       stem_tree_.MutateTarget(root, stem_uncount_fn);
     }
     for (const auto &word : empty_words) {
-      std::string stem =
-          stem_filter ? stem_filter->GetStemRoot(word, min_stem_size_, unit)
-                      : word;
+      // No MINSTEMSIZE: another key may have added the word as a parent under
+      // a different length unit, and the root does not depend on the unit.
+      std::string stem = stem_filter ? stem_filter->GetStemRoot(word) : word;
       if (stem != word) {
         auto stem_remove_fn = CreateSimpleTargetMutateFn<StemParents>(
             [&word](InvasivePtr<StemParents> existing) {

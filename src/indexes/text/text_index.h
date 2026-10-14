@@ -240,9 +240,13 @@ class TextIndexSchema {
   struct KeyScoringInfo {
     uint32_t doc_len{0};
     uint32_t norm{0};
+    // MINSTEMSIZE unit the key was stemmed with. emulate-release can change
+    // the language's unit after commit, and DeleteKeyData must undo the stem
+    // counts the key actually made.
+    LengthUnit stem_unit{LengthUnit::kCodePoints};
   };
 
-  // flat_hash_map (not node_hash_map): KeyScoringInfo is 8 bytes and needs no
+  // flat_hash_map (not node_hash_map): KeyScoringInfo is 12 bytes and needs no
   // pointer stability, so storing it inline avoids a per-document cache miss on
   // the GetKeyDocLen() scoring hot path.
   // Transparent functors so GetKeyDocLen() can probe with a borrowed key.
