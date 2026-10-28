@@ -323,6 +323,9 @@ class IndexSchema : public KeyspaceEventSubscription,
       const std::vector<indexes::Neighbor> &neighbors,
       std::unique_ptr<query::SearchParameters> &&params)
       ABSL_LOCKS_EXCLUDED(mutated_records_mutex_);
+  // True if PerformKeyContentionCheck would park on `neighbors`.
+  bool HasContendedKey(const std::vector<indexes::Neighbor> &neighbors) const
+      ABSL_LOCKS_EXCLUDED(mutated_records_mutex_);
 
   // Blocks until the in-flight mutations of `neighbors` are indexed, or
   // `deadline` passes (false). For queries that reply synchronously and so

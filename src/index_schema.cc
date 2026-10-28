@@ -2110,6 +2110,23 @@ bool IndexSchema::PerformKeyContentionCheck(
   return false;
 }
 
+bool IndexSchema::HasContendedKey(
+    const std::vector<indexes::Neighbor> &neighbors) const {
+  const auto &dbkeyinfo_map = db_key_info_.Get();
+  for (const auto &neighbor : neighbors) {
+    auto db_itr = dbkeyinfo_map.find(neighbor.external_id);
+    if (db_itr == dbkeyinfo_map.end() ||
+        db_itr->second.mutation_sequence_number_ == neighbor.sequence_number) {
+      continue;
+    }
+    absl::MutexLock lock(&mutated_records_mutex_);
+    if (tracked_mutated_records_.contains(neighbor.external_id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool IndexSchema::WaitForContendedKeys(
     const std::vector<indexes::Neighbor> &neighbors, absl::Time deadline) {
   const auto &dbkeyinfo_map = db_key_info_.Get();
