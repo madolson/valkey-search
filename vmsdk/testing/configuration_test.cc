@@ -537,6 +537,12 @@ TEST_F(ConfigTest, CheckDouble) {
   // FromString malformed.
   EXPECT_FALSE(cfg->FromString("not-a-number").ok());
 
+  // NaN compares false against both bounds, so it must be rejected by Parse.
+  for (const char *nan : {"nan", "NaN", "-nan", "nan(1)"}) {
+    EXPECT_FALSE(cfg->FromString(nan).ok()) << nan;
+    EXPECT_DOUBLE_EQ(cfg->GetValue(), 3.75) << nan;
+  }
+
   // FromString that fails the bounds check must leave both current value
   // and default untouched.
   auto bad = cfg->FromString("99.0");
