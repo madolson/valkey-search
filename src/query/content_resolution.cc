@@ -21,8 +21,10 @@ namespace valkey_search::query {
 
 void ResolveContent(std::unique_ptr<SearchParameters> params) {
   vmsdk::VerifyMainThread();
-  // 1. Check cancellation
-  if (params->cancellation_token->IsCancelled()) {
+  // 1. Check cancellation. A query that needs a contention check is handled in
+  // step 3 instead.
+  if (params->GetContentProcessing() != kContentionCheckRequired &&
+      params->cancellation_token->IsCancelled()) {
     params->QueryCompleteMainThread(std::move(params));
     return;
   }
@@ -35,10 +37,28 @@ void ResolveContent(std::unique_ptr<SearchParameters> params) {
     return;
   }
 
-  // 3. If kContentionCheckRequired, check for in-flight mutations
+  // 3. If kContentionCheckRequired, check for in-flight mutations.
+  //
+  // A cancelled query's neighbors are still revalidated by whoever completes
+  // it (the fetch below, or ArmGate), and that is only safe right after this
+  // check (see VerifyFilter). Once cancelled, though, a query does not wait:
+  // parking would hold it for as long as writers keep its keys busy. It fails
+  // instead when a key is in flight, or when partial results are off and the
+  // reply would be the error anyway, and its neighbors are dropped so that no
+  // completion revalidates them.
   if (params->GetContentProcessing() == kContentionCheckRequired) {
-    if (params->index_schema->PerformKeyContentionCheck(
-            params->search_result.neighbors, std::move(params))) {
+    if (params->cancellation_token->IsCancelled()) {
+      if (!params->enable_partial_results ||
+          params->index_schema->HasContendedKey(
+              params->search_result.neighbors)) {
+        params->search_result.status = absl::CancelledError(kTimeoutMsg);
+        params->search_result.neighbors.clear();
+        params->search_result.total_count = 0;
+        params->QueryCompleteMainThread(std::move(params));
+        return;
+      }
+    } else if (params->index_schema->PerformKeyContentionCheck(
+                   params->search_result.neighbors, std::move(params))) {
       // Contention found — params has been moved into the mutation queue.
       // ConsumeTrackedMutatedAttribute will call ResolveContent again
       // via RunByMain when the mutation completes.

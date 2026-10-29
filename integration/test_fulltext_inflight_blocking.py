@@ -13,7 +13,49 @@ from valkey_search_test_case import (
 )
 from valkeytestframework.util import waiters
 from valkeytestframework.conftest import resource_port_tracker
-from utils import IndexingTestHelper, run_in_thread
+from utils import IndexingTestHelper, pausepoint_hit, run_in_thread
+
+
+# The longest TIMEOUT a query accepts.
+HELD_SEARCH_TIMEOUT_MS = 60000
+
+
+def hold_search(node, run, arms=1):
+    """Runs `run` in a thread and returns once every arm of its search has
+    matched on `node` and is held there, before the main thread sees it."""
+    node.execute_command("FT._DEBUG PAUSEPOINT SET background_search_completing")
+    held = run_in_thread(run)
+    waiters.wait_for_true(
+        lambda: node.execute_command(
+            "FT._DEBUG PAUSEPOINT TEST background_search_completing") >= arms
+    )
+    return held
+
+
+def time_out_held_search(node, held):
+    """Times out a search held by hold_search, releases it and returns its
+    (reply, error). The search must carry a TIMEOUT of HELD_SEARCH_TIMEOUT_MS,
+    so that one which waits instead of replying is caught here rather than
+    answered by the server's own timeout."""
+    thread, res, err = held
+    # Poll the deadline on every check, so the first one after the search
+    # sees the forced timeout.
+    node.execute_command("FT._DEBUG CONTROLLED_VARIABLE SET TimeoutPollFrequency 0")
+    node.execute_command("FT._DEBUG CONTROLLED_VARIABLE SET ForceTimeout yes")
+    node.execute_command("FT._DEBUG PAUSEPOINT RESET background_search_completing")
+    waiters.wait_for_true(lambda: not thread.is_alive(),
+                          timeout=HELD_SEARCH_TIMEOUT_MS / 2000)
+    node.execute_command("FT._DEBUG CONTROLLED_VARIABLE SET ForceTimeout no")
+    return res[0], err[0]
+
+
+def mutation_in_flight(node, hset):
+    """Runs `hset` in a thread and returns once its mutation is parked in
+    `node`'s writer, where it stays until mutation_processing is reset."""
+    node.execute_command("FT._DEBUG PAUSEPOINT SET mutation_processing")
+    held = run_in_thread(hset)
+    waiters.wait_for_true(lambda: pausepoint_hit(node, "mutation_processing"))
+    return held
 
 
 class TestFullTextInFlightBlockingCMD(ValkeySearchTestCaseDebugMode):
@@ -21,8 +63,10 @@ class TestFullTextInFlightBlockingCMD(ValkeySearchTestCaseDebugMode):
 
     def append_startup_args(self, args: dict[str, str]) -> dict[str, str]:
         args = super().append_startup_args(args)
-        # Need 2 writer threads for concurrent pausepoint blocking.
+        # Need 2 writer threads for concurrent pausepoint blocking, and 2
+        # reader threads to hold both arms of an FT.HYBRID at once.
         args["search.writer-threads"] = "2"
+        args["search.reader-threads"] = "2"
         return args
 
     def test_fulltext_inflight_blocking_with_pausepoint(self):
@@ -237,6 +281,103 @@ class TestFullTextInFlightBlockingCMD(ValkeySearchTestCaseDebugMode):
         assert lua_search("@content:bye", timeout_ms=10000) == [
             1, b"doc:1", [b"content", b"bye"]]
         assert blocked() == before
+
+    def test_cancelled_query_with_inflight_mutation(self):
+        """A query that times out after its search must not revalidate a
+        result key whose mutation is in flight, since the writer may be
+        freeing that key's text index. It returns the timeout error instead.
+        A key whose mutation has been applied is still revalidated, and
+        returned as a partial result."""
+        client: Valkey = self.server.get_new_client()
+        client.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:",
+            "SCHEMA", "content", "TEXT"
+        )
+        client.execute_command("HSET", "doc:1", "content", "hello world")
+        IndexingTestHelper.wait_for_indexing_complete_on_node(client, "idx")
+        search = lambda query, *args: lambda: self.server.get_new_client().execute_command(
+            "FT.SEARCH", "idx", query, "TIMEOUT", HELD_SEARCH_TIMEOUT_MS, *args)
+        revalidations = lambda: int(client.info("SEARCH")["search_predicate_revalidation"])
+
+        # The prefix walk reads doc:1's own tree, which the paused writer is
+        # about to free.
+        held = hold_search(client, search("@content:hel*"))
+        hset = mutation_in_flight(
+            client,
+            lambda: self.server.get_new_client().execute_command(
+                "HSET", "doc:1", "content", "bye"),
+        )
+        res, err = time_out_held_search(client, held)
+        assert isinstance(err, ResponseError), res
+        assert "timeout" in str(err).lower()
+
+        client.execute_command("FT._DEBUG PAUSEPOINT RESET mutation_processing")
+        hset[0].join()
+        assert hset[2][0] is None
+        IndexingTestHelper.wait_for_indexing_complete_on_node(client, "idx")
+
+        held = hold_search(client, search("@content:bye"))
+        client.execute_command("HSET", "doc:1", "content", "bye again")
+        IndexingTestHelper.wait_for_indexing_complete_on_node(client, "idx")
+        before = revalidations()
+        res, err = time_out_held_search(client, held)
+        assert err is None
+        assert res == [1, b"doc:1", [b"content", b"bye again"]]
+        assert revalidations() == before + 1
+
+        # With partial results off the reply is the timeout error either way,
+        # so nothing is revalidated for it.
+        held = hold_search(client, search("@content:bye", "ALLSHARDS"))
+        client.execute_command("HSET", "doc:1", "content", "bye once more")
+        IndexingTestHelper.wait_for_indexing_complete_on_node(client, "idx")
+        before = revalidations()
+        res, err = time_out_held_search(client, held)
+        assert isinstance(err, ResponseError), res
+        assert "timeout" in str(err).lower()
+        assert revalidations() == before
+
+    def test_cancelled_hybrid_with_inflight_mutation(self):
+        """FT.HYBRID revalidates its arms before fusing them, and a timed-out
+        FT.HYBRID must not do that for a key whose mutation is in flight. The
+        aggregate stages answer a timed-out FT.HYBRID with the timeout error
+        either way, so the reply alone cannot tell; the revalidation count
+        can."""
+        client: Valkey = self.server.get_new_client()
+        client.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:",
+            "SCHEMA", "content", "TEXT", "vec", "VECTOR", "HNSW", "6",
+            "TYPE", "FLOAT32", "DIM", "4", "DISTANCE_METRIC", "L2"
+        )
+        near = struct.pack('<4f', 0.0, 0.0, 0.0, 0.0)
+        far = struct.pack('<4f', 9.0, 9.0, 9.0, 9.0)
+        # doc:1 reaches the fused result only through the SEARCH arm.
+        client.execute_command("HSET", "doc:1", "content", "hello world", "vec", far)
+        client.execute_command("HSET", "doc:2", "content", "other", "vec", near)
+        IndexingTestHelper.wait_for_indexing_complete_on_node(client, "idx")
+
+        held = hold_search(
+            client,
+            lambda: self.server.get_new_client().execute_command(
+                "FT.HYBRID", "idx", "SEARCH", "@content:hel*",
+                "VSIM", "@vec", "$q", "KNN", "2", "K", "1",
+                "PARAMS", "2", "q", near, "TIMEOUT", HELD_SEARCH_TIMEOUT_MS),
+            arms=2,
+        )
+        hset = mutation_in_flight(
+            client,
+            lambda: self.server.get_new_client().execute_command(
+                "HSET", "doc:1", "content", "bye"),
+        )
+        revalidations = lambda: int(client.info("SEARCH")["search_predicate_revalidation"])
+        before = revalidations()
+        res, err = time_out_held_search(client, held)
+        assert isinstance(err, ResponseError), res
+        assert "timeout" in str(err).lower()
+        assert revalidations() == before
+
+        client.execute_command("FT._DEBUG PAUSEPOINT RESET mutation_processing")
+        hset[0].join()
+        assert hset[2][0] is None
 
     def test_non_text_nocontent_query_does_not_block(self):
         """Test that NOCONTENT non-text queries on index with text field do NOT block."""
@@ -639,6 +780,46 @@ class TestFullTextInFlightBlockingCME(ValkeySearchClusterTestCaseDebugMode):
         assert set(result[1::2]) == {k.encode() for k in remote_keys}
         for fields in result[2::2]:
             assert fields == [b"content", b"hello remote"]
+
+    def test_cancelled_query_with_inflight_mutation_on_coordinator(self):
+        """The coordinator's own shard, timed out with a result key in flight,
+        drops out like a failed shard instead of having that key revalidated
+        in the reply, and the remote shards still answer."""
+        coordinator: Valkey = self.client_for_primary(0)
+        cluster_client: ValkeyCluster = self.new_cluster_client()
+        primary_clients = self.get_all_primary_clients()
+        remote_clients = primary_clients[1:]
+
+        coordinator_key = self._find_key_for_node(coordinator, "doc:coord:")
+        remote_keys = [self._find_key_for_node(nc, f"doc:remote{i}:") for i, nc in enumerate(remote_clients)]
+
+        coordinator.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:",
+            "SCHEMA", "content", "TEXT"
+        )
+        cluster_client.execute_command("HSET", coordinator_key, "content", "hello coordinator")
+        for key in remote_keys:
+            cluster_client.execute_command("HSET", key, "content", "hello remote")
+        IndexingTestHelper.wait_for_indexing_complete_on_all_nodes(primary_clients, "idx")
+
+        held = hold_search(
+            coordinator,
+            lambda: coordinator.execute_command(
+                "FT.SEARCH", "idx", "@content:hel*", "TIMEOUT", HELD_SEARCH_TIMEOUT_MS),
+        )
+        hset = mutation_in_flight(
+            coordinator,
+            lambda: cluster_client.execute_command("HSET", coordinator_key, "content", "bye"),
+        )
+        res, err = time_out_held_search(coordinator, held)
+
+        coordinator.execute_command("FT._DEBUG PAUSEPOINT RESET mutation_processing")
+        hset[0].join()
+        assert hset[2][0] is None
+
+        assert err is None
+        assert res[0] == len(remote_keys), res
+        assert set(res[1::2]) == {k.encode() for k in remote_keys}
 
     def test_fulltext_data_correctness_cluster_with_inflight_mutation(self):
         """Test that full-text query results are correct in cluster mode when mutations
